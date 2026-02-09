@@ -28,7 +28,7 @@ public class Stock {
     public DoubleProperty changeProperty() { return change; }
     public void setChange(double change) { this.change.set(change); }
 
-    // Gettery i Settery do alarmów
+
     public double getAlertMin() { return alertMin; }
     public void setAlertMin(double alertMin) { this.alertMin = alertMin; }
 

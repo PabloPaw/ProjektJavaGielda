@@ -20,6 +20,7 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -28,10 +29,12 @@ public class StockApp extends Application {
 
     private final StockService stockService = new StockService();
     private final ObservableList<Stock> stockData = FXCollections.observableArrayList();
+    private final ObservableList<Stock> currencyData = FXCollections.observableArrayList();
     private final ObservableList<PortfolioItem> myPortfolioData = FXCollections.observableArrayList();
+
     private final Map<String, XYChart.Series<String, Number>> stockSeriesMap = new HashMap<>();
 
-    private LineChart<String, Number> lineChart;
+    private LineChart<String, Number> liveChart;
     private Stock selectedStock;
 
     // UI Elements
@@ -40,31 +43,46 @@ public class StockApp extends Application {
     private Label ownedLabel;
     private Label activeAlertLabel;
 
-    // Nowe elementy do wyboru trybu kupna
-    private RadioButton rbQuantity; // Tryb "Ilość sztuk"
-    private RadioButton rbValue;    // Tryb "Za kwotę"
-    private TextField amountField;  // Pole wpisywania
+    private RadioButton rbQuantity;
+    private RadioButton rbValue;
+    private TextField amountField;
 
     private TableView<Stock> marketTable;
+    private TableView<Stock> currencyTable;
     private TableView<PortfolioItem> portfolioTable;
 
-    private double cash = 50000.00; // Dałem więcej kasy na start do testów
+
+    private double cash = 10000.00;
+
     private boolean isDarkMode = true;
     private Scene scene;
 
     @Override
     public void start(Stage primaryStage) {
-        stockData.addAll(stockService.getInitialStocks());
-        if (!stockData.isEmpty()) selectedStock = stockData.get(0);
 
-        stockService.startMarketMonitor(stockData);
+        showStartupDialog();
+
+
+        stockData.addAll(stockService.getStocks());
+        currencyData.addAll(stockService.getCurrencies());
+
+        if (!stockData.isEmpty()) {
+            selectedStock = stockData.get(0);
+        }
+
+        stockService.startMarketMonitor(stockData, currencyData);
+
 
         TabPane tabPane = new TabPane();
         tabPane.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
-        Tab marketTab = new Tab("Rynek i Handel");
+
+        Tab marketTab = new Tab("Rynek Live");
         marketTab.setContent(createMarketView());
+
         Tab portfolioTab = new Tab("Mój Portfel");
         portfolioTab.setContent(createPortfolioView());
+
+
         tabPane.getTabs().addAll(marketTab, portfolioTab);
 
         BorderPane root = new BorderPane();
@@ -73,18 +91,35 @@ public class StockApp extends Application {
 
         startMarketSimulation();
 
-        scene = new Scene(root, 1150, 750);
+        scene = new Scene(root, 1200, 800);
         applyTheme();
 
-        primaryStage.setTitle("WIG20 Pro Trader - Fractional Trading");
+        primaryStage.setTitle("WIG20 Pro Trader");
         primaryStage.setScene(scene);
         primaryStage.show();
+    }
+
+    // --- OKIENKO STARTOWE ---
+    private void showStartupDialog() {
+        TextInputDialog dialog = new TextInputDialog("50000");
+        dialog.setTitle("Konfiguracja Portfela");
+        dialog.setHeaderText("Witaj w symulatorze giełdowym!");
+        dialog.setContentText("Podaj kwotę startową (PLN):");
+
+        Optional<String> result = dialog.showAndWait();
+        result.ifPresent(amount -> {
+            try {
+                double value = Double.parseDouble(amount);
+                if (value > 0) this.cash = value;
+            } catch (NumberFormatException e) { }
+        });
     }
 
     private void toggleTheme() {
         isDarkMode = !isDarkMode;
         applyTheme();
         if (marketTable != null) marketTable.refresh();
+        if (currencyTable != null) currencyTable.refresh();
         if (portfolioTable != null) portfolioTable.refresh();
     }
 
@@ -99,117 +134,127 @@ public class StockApp extends Application {
     private BorderPane createMarketView() {
         BorderPane pane = new BorderPane();
         pane.setPadding(new Insets(10));
-        pane.setLeft(createStockTable());
-        pane.setCenter(createChartSection());
+
+        VBox leftPanel = new VBox(10);
+        leftPanel.setPrefWidth(350);
+
+        Label stocksLabel = new Label("Notowania Live");
+        stocksLabel.setStyle("-fx-font-weight: bold;");
+        marketTable = createStockTableView(stockData, true);
+        VBox.setVgrow(marketTable, Priority.ALWAYS);
+
+        Label currencyLabel = new Label("Kursy średnie NBP");
+        currencyLabel.setStyle("-fx-font-weight: bold; -fx-text-fill: #aaa;");
+        currencyTable = createStockTableView(currencyData, false);
+        currencyTable.setPrefHeight(130);
+
+        leftPanel.getChildren().addAll(stocksLabel, marketTable, new Separator(), currencyLabel, currencyTable);
+
+        pane.setLeft(leftPanel);
+        pane.setCenter(createLiveChartSection());
         pane.setRight(createRightPanel());
         return pane;
     }
 
-    private VBox createStockTable() {
-        marketTable = new TableView<>();
-        marketTable.setItems(stockData);
-        marketTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
+    private TableView<Stock> createStockTableView(ObservableList<Stock> data, boolean isLiveTable) {
+        TableView<Stock> table = new TableView<>();
+        table.setItems(data);
+        table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
         TableColumn<Stock, String> symCol = new TableColumn<>("Symbol");
         symCol.setCellValueFactory(new PropertyValueFactory<>("symbol"));
-
-        TableColumn<Stock, Double> priceCol = new TableColumn<>("Kurs");
-        priceCol.setCellValueFactory(new PropertyValueFactory<>("price"));
-
-        TableColumn<Stock, Double> chgCol = new TableColumn<>("Zmiana");
-        chgCol.setCellValueFactory(new PropertyValueFactory<>("change"));
-
         symCol.setCellFactory(col -> new TableCell<>() {
             @Override protected void updateItem(String item, boolean empty) {
                 super.updateItem(item, empty);
                 setText(empty ? null : item);
                 if (!empty) {
-                    if (item.equals("WIG20")) setStyle("-fx-font-weight: bold; -fx-text-fill: #FFD700;");
-                    else if (item.equals("BITCOIN")) setStyle("-fx-font-weight: bold; -fx-text-fill: #F7931A;");
-                    else {
-                        setStyle("");
-                        setTextFill(isDarkMode ? Color.WHITE : Color.BLACK);
-                    }
+                    if (item.equals("BITCOIN")) setStyle("-fx-font-weight: bold; -fx-text-fill: #F7931A;");
+                    else { setStyle(""); setTextFill(isDarkMode ? Color.WHITE : Color.BLACK); }
                 }
             }
         });
 
+        TableColumn<Stock, Double> priceCol = new TableColumn<>("Kurs");
+        priceCol.setCellValueFactory(new PropertyValueFactory<>("price"));
         priceCol.setCellFactory(col -> new TableCell<>() {
             @Override protected void updateItem(Double item, boolean empty) {
                 super.updateItem(item, empty);
-                if (empty || item == null) { setText(null); return; }
-                setText(String.format("%.2f", item));
-                setTextFill(isDarkMode ? Color.WHITE : Color.BLACK);
+                if (!empty && item != null) {
+                    setText(String.format("%.2f", item));
+                    setTextFill(isDarkMode ? Color.WHITE : Color.BLACK);
+                } else setText(null);
             }
         });
 
-        chgCol.setCellFactory(col -> new TableCell<>() {
-            @Override protected void updateItem(Double item, boolean empty) {
-                super.updateItem(item, empty);
-                if (empty || item == null) { setText(null); setStyle(""); return; }
-                setText(String.format("%.2f%%", item));
-                if (item > 0) setTextFill(Color.web("#00AA00"));
-                else if (item < 0) setTextFill(Color.RED);
-                else setTextFill(isDarkMode ? Color.WHITE : Color.BLACK);
-            }
-        });
+        table.getColumns().add(symCol);
+        table.getColumns().add(priceCol);
 
-        marketTable.getColumns().addAll(symCol, priceCol, chgCol);
-        marketTable.getSelectionModel().selectedItemProperty().addListener((o, old, newVal) -> {
-            if (newVal != null) {
-                selectedStock = newVal;
-                refreshChart();
-                updateOwnedLabel();
-                updateAlertLabel();
-            }
-        });
+        if (isLiveTable) {
+            TableColumn<Stock, Double> chgCol = new TableColumn<>("Zmiana");
+            chgCol.setCellValueFactory(new PropertyValueFactory<>("change"));
+            chgCol.setCellFactory(col -> new TableCell<>() {
+                @Override protected void updateItem(Double item, boolean empty) {
+                    super.updateItem(item, empty);
+                    if (!empty && item != null) {
+                        setText(String.format("%.2f%%", item));
+                        if (item > 0) setTextFill(Color.web("#00AA00"));
+                        else if (item < 0) setTextFill(Color.RED);
+                        else setTextFill(isDarkMode ? Color.WHITE : Color.BLACK);
+                    } else setText(null);
+                }
+            });
+            table.getColumns().add(chgCol);
 
-        VBox box = new VBox(10, new Label("Notowania"), marketTable);
-        box.setPrefWidth(300);
-        return box;
+            table.getSelectionModel().selectedItemProperty().addListener((o, old, newVal) -> {
+                if (newVal != null) {
+                    selectedStock = newVal;
+                    refreshLiveChart();
+                    updateOwnedLabel();
+                    updateAlertLabel();
+                }
+            });
+        } else {
+            table.setSelectionModel(null);
+        }
+
+        return table;
     }
 
-    private VBox createChartSection() {
+    private VBox createLiveChartSection() {
         CategoryAxis xAxis = new CategoryAxis();
         xAxis.setTickLabelsVisible(true);
-        xAxis.setLabel("Czas");
+        xAxis.setLabel("Czas (Live)");
         NumberAxis yAxis = new NumberAxis();
         yAxis.setAutoRanging(true);
         yAxis.setForceZeroInRange(false);
-        lineChart = new LineChart<>(xAxis, yAxis);
-        lineChart.setTitle("Wykres (Live)");
-        lineChart.setAnimated(false);
-        lineChart.setCreateSymbols(false);
-        lineChart.setLegendVisible(false);
-        VBox box = new VBox(lineChart);
+        liveChart = new LineChart<>(xAxis, yAxis);
+        liveChart.setTitle("Wykres");
+        liveChart.setAnimated(false);
+        liveChart.setCreateSymbols(false);
+        liveChart.setLegendVisible(false);
+        VBox box = new VBox(liveChart);
         box.setPadding(new Insets(0, 10, 0, 10));
-        VBox.setVgrow(lineChart, Priority.ALWAYS);
+        VBox.setVgrow(liveChart, Priority.ALWAYS);
         return box;
     }
 
-    // --- ZMODYFIKOWANY PANEL HANDLU (UŁAMKI I KWOTY) ---
     private VBox createRightPanel() {
         Label tradeTitle = new Label("Panel Handlu");
         tradeTitle.setStyle("-fx-font-weight: bold;");
-
-        ownedLabel = new Label("Posiadasz: 0.0000 szt."); // Więcej miejsc po przecinku
+        ownedLabel = new Label("Posiadasz: 0.0000 szt.");
         ownedLabel.setTextFill(Color.GRAY);
 
-        // Wybór trybu
         ToggleGroup group = new ToggleGroup();
         rbQuantity = new RadioButton("Ilość (szt.)");
         rbQuantity.setToggleGroup(group);
-        rbQuantity.setSelected(true); // Domyślnie
+        rbQuantity.setSelected(true);
         rbQuantity.setTextFill(Color.LIGHTGRAY);
-
         rbValue = new RadioButton("Kwota (PLN)");
         rbValue.setToggleGroup(group);
         rbValue.setTextFill(Color.LIGHTGRAY);
 
-        // Zmiana podpowiedzi w polu tekstowym zależnie od wyboru
         amountField = new TextField();
         amountField.setPromptText("Wpisz ilość...");
-
         group.selectedToggleProperty().addListener((obs, oldVal, newVal) -> {
             if (rbQuantity.isSelected()) amountField.setPromptText("Np. 0.5 lub 10");
             else amountField.setPromptText("Np. 2000 PLN");
@@ -221,18 +266,15 @@ public class StockApp extends Application {
         Button buyBtn = new Button("KUP");
         buyBtn.setStyle("-fx-background-color: #2ea043; -fx-text-fill: white;");
         buyBtn.setOnAction(e -> handleTransaction(true));
-
         Button sellBtn = new Button("SPRZEDAJ");
         sellBtn.setStyle("-fx-background-color: #d73a49; -fx-text-fill: white;");
         sellBtn.setOnAction(e -> handleTransaction(false));
-
         HBox tradeBtns = new HBox(5, buyBtn, sellBtn);
         tradeBtns.setAlignment(Pos.CENTER);
 
         VBox tradeBox = new VBox(10, tradeTitle, ownedLabel, new Separator(), radioBox, amountField, tradeBtns);
         tradeBox.setStyle("-fx-border-color: #555; -fx-padding: 10; -fx-border-radius: 5;");
 
-        // Alerty
         Label alertTitle = new Label("Alerty Cenowe");
         alertTitle.setStyle("-fx-font-weight: bold;");
         activeAlertLabel = new Label("Brak ustawień");
@@ -249,7 +291,7 @@ public class StockApp extends Application {
 
         VBox mainRight = new VBox(20, tradeBox, alertBox);
         mainRight.setPadding(new Insets(0, 5, 0, 5));
-        mainRight.setPrefWidth(240); // Trochę szerszy panel
+        mainRight.setPrefWidth(240);
         return mainRight;
     }
 
@@ -257,11 +299,8 @@ public class StockApp extends Application {
         portfolioTable = new TableView<>();
         portfolioTable.setItems(myPortfolioData);
         portfolioTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
-
         TableColumn<PortfolioItem, String> symCol = new TableColumn<>("Symbol");
         symCol.setCellValueFactory(cell -> new SimpleStringProperty(cell.getValue().getStock().getSymbol()));
-
-        // Ilość jako Double (4 miejsca po przecinku dla krypto)
         TableColumn<PortfolioItem, Double> qtyCol = new TableColumn<>("Ilość");
         qtyCol.setCellValueFactory(cell -> cell.getValue().quantityProperty().asObject());
         qtyCol.setCellFactory(col -> new TableCell<>() {
@@ -269,17 +308,15 @@ public class StockApp extends Application {
                 super.updateItem(item, empty);
                 if (empty || item == null) setText(null);
                 else {
-                    setText(String.format("%.4f", item)); // 4 miejsca po przecinku
+                    setText(String.format("%.4f", item));
                     setTextFill(isDarkMode ? Color.WHITE : Color.BLACK);
                 }
             }
         });
-
         TableColumn<PortfolioItem, Double> valCol = new TableColumn<>("Wartość");
         valCol.setCellValueFactory(cell -> new SimpleDoubleProperty(
                 cell.getValue().getQuantity() * cell.getValue().getStock().getPrice()
         ).asObject());
-
         valCol.setCellFactory(col -> new TableCell<>() {
             @Override protected void updateItem(Double item, boolean empty) {
                 super.updateItem(item, empty);
@@ -290,7 +327,6 @@ public class StockApp extends Application {
                 }
             }
         });
-
         portfolioTable.getColumns().addAll(symCol, qtyCol, valCol);
         VBox box = new VBox(10, new Label("Twój Portfel"), portfolioTable);
         box.setPadding(new Insets(20));
@@ -312,34 +348,22 @@ public class StockApp extends Application {
         return box;
     }
 
-    // --- LOGIKA TRANSAKCJI (OBSŁUGA UŁAMKÓW I KWOT) ---
+    // --- LOGIKA ---
     private void handleTransaction(boolean isBuying) {
         if (selectedStock == null) return;
         try {
-            // Zastępujemy przecinki kropkami, żeby double zadziałał (np. 0,5 -> 0.5)
             String input = amountField.getText().replace(",", ".");
             double value = Double.parseDouble(input);
             if (value <= 0) return;
-
             double quantityToTrade = 0;
-
-            if (rbQuantity.isSelected()) {
-                // Tryb: Kupuję KONKRETNĄ ILOŚĆ (np. 0.5 sztuki)
-                quantityToTrade = value;
-            } else {
-                // Tryb: Kupuję ZA KWOTĘ (np. za 2000 zł)
-                // Ilość = Kwota / Cena
-                quantityToTrade = value / selectedStock.getPrice();
-            }
+            if (rbQuantity.isSelected()) quantityToTrade = value;
+            else quantityToTrade = value / selectedStock.getPrice();
 
             if (isBuying) buyStock(selectedStock, quantityToTrade);
             else sellStock(selectedStock, quantityToTrade);
-
             amountField.clear();
             updateOwnedLabel();
-        } catch (NumberFormatException ex) {
-            showAlert("Błąd", "Wpisz poprawną liczbę!");
-        }
+        } catch (NumberFormatException ex) { showAlert("Błąd", "Wpisz poprawną liczbę!"); }
     }
 
     private void buyStock(Stock stock, double quantity) {
@@ -347,38 +371,25 @@ public class StockApp extends Application {
         if (cash >= cost) {
             cash -= cost;
             PortfolioItem existing = findPortfolioItem(stock.getSymbol());
-            if (existing != null) {
-                existing.setQuantity(existing.getQuantity() + quantity);
-            } else {
-                myPortfolioData.add(new PortfolioItem(stock, quantity));
-            }
+            if (existing != null) existing.setQuantity(existing.getQuantity() + quantity);
+            else myPortfolioData.add(new PortfolioItem(stock, quantity));
             updateFinanceLabels();
             showAlert("Sukces", String.format("Kupiłeś %.4f szt. %s", quantity, stock.getSymbol()));
-        } else {
-            showAlert("Brak środków", "Nie masz wystarczająco gotówki!");
-        }
+        } else showAlert("Brak środków", "Nie masz wystarczająco gotówki!");
     }
 
     private void sellStock(Stock stock, double quantity) {
         PortfolioItem item = findPortfolioItem(stock.getSymbol());
-        // Sprawdzamy z małym marginesem błędu dla double (epsilon)
         if (item != null && item.getQuantity() >= (quantity - 0.0001)) {
-            double value = stock.getPrice() * quantity;
-            cash += value;
+            cash += stock.getPrice() * quantity;
             double newQty = item.getQuantity() - quantity;
-
-            // Jeśli zostało bardzo mało (np. 0.000001), usuwamy pozycję
             if (newQty < 0.0001) myPortfolioData.remove(item);
             else item.setQuantity(newQty);
-
             updateFinanceLabels();
             showAlert("Sukces", String.format("Sprzedałeś %.4f szt. %s", quantity, stock.getSymbol()));
-        } else {
-            showAlert("Błąd", "Nie masz tyle akcji!");
-        }
+        } else showAlert("Błąd", "Nie masz tyle akcji!");
     }
 
-    // --- RESZTA LOGIKI ---
     private void handleSetAlerts(TextField minField, TextField maxField) {
         try {
             double min = minField.getText().isEmpty() ? 0 : Double.parseDouble(minField.getText());
@@ -419,7 +430,6 @@ public class StockApp extends Application {
         if (selectedStock != null) {
             PortfolioItem item = findPortfolioItem(selectedStock.getSymbol());
             double qty = (item != null) ? item.getQuantity() : 0;
-            // Formatujemy do 4 miejsc po przecinku
             ownedLabel.setText(String.format("Posiadasz: %.4f szt.", qty));
         }
     }
@@ -438,11 +448,10 @@ public class StockApp extends Application {
             Platform.runLater(() -> {
                 for (Stock s : stockData) {
                     stockService.updateStockPrice(s);
-                    updateChart(s);
+                    updateLiveChart(s);
                     checkAlerts(s);
                 }
                 if (!myPortfolioData.isEmpty()) {
-                    // Wymuszamy odświeżenie tabeli, żeby wartości portfela zmieniały się live
                     portfolioTable.refresh();
                     updateFinanceLabels();
                 }
@@ -450,7 +459,7 @@ public class StockApp extends Application {
         }, 0, 1, TimeUnit.SECONDS);
     }
 
-    private void updateChart(Stock s) {
+    private void updateLiveChart(Stock s) {
         if (!stockSeriesMap.containsKey(s.getSymbol())) {
             XYChart.Series<String, Number> series = new XYChart.Series<>();
             series.setName(s.getSymbol());
@@ -462,17 +471,17 @@ public class StockApp extends Application {
         if (series.getData().size() > 30) series.getData().remove(0);
 
         if (selectedStock != null && s.getSymbol().equals(selectedStock.getSymbol())) {
-            if (!lineChart.getData().contains(series)) {
-                lineChart.getData().clear();
-                lineChart.getData().add(series);
+            if (!liveChart.getData().contains(series)) {
+                liveChart.getData().clear();
+                liveChart.getData().add(series);
             }
         }
     }
 
-    private void refreshChart() {
-        lineChart.getData().clear();
+    private void refreshLiveChart() {
+        liveChart.getData().clear();
         if (selectedStock != null && stockSeriesMap.containsKey(selectedStock.getSymbol())) {
-            lineChart.getData().add(stockSeriesMap.get(selectedStock.getSymbol()));
+            liveChart.getData().add(stockSeriesMap.get(selectedStock.getSymbol()));
         }
     }
 
@@ -488,18 +497,14 @@ public class StockApp extends Application {
         launch(args);
     }
 
-    // --- ZAKTUALIZOWANA KLASA PORTFOLIO (DOUBLE ZAMIAST INT) ---
     public static class PortfolioItem {
         private final Stock stock;
-        // Zmiana z SimpleIntegerProperty na SimpleDoubleProperty
         private final SimpleDoubleProperty quantity;
-
         public PortfolioItem(Stock stock, double quantity) {
             this.stock = stock;
             this.quantity = new SimpleDoubleProperty(quantity);
         }
         public Stock getStock() { return stock; }
-
         public double getQuantity() { return quantity.get(); }
         public void setQuantity(double q) { this.quantity.set(q); }
         public SimpleDoubleProperty quantityProperty() { return quantity; }
